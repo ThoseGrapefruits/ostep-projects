@@ -277,7 +277,7 @@ and print out the uncompressed output to standard output using **printf()**.
   **wunzip** respectively. 
 * The format of the compressed file must match the description above exactly
   (a 4-byte integer followed by a character for each run).
-* Do note that if multiple files are passed to **wzip*, they are compressed
+* Do note that if multiple files are passed to **wzip**, they are compressed
   into a single compressed output, and when unzipped, will turn into a single
   uncompressed stream of text (thus, the information that multiple files were
   originally input into **wzip** is lost). The same thing holds for
