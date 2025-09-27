@@ -6,42 +6,92 @@
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
-#define FILENAME "db.txt"
+#define DB_FILE_FLAGS S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP
+#define FILENAME_I "db.indices"
+#define FILENAME_D "db.data"
+#define INIT_FILE_SIZE 4096
 #define LINE_LIM 1023
 #define KEY_LEN 32
 
+struct ifile {
+  int icount;
+  int iend;
+  char indices[1023];
+};
+
 int main(int argc, char** argv) {
-  int i, line, key, result, linekey, foundline;
-  int fd = open(FILENAME, O_RDWR);
-  struct stat sb;
+  bool init = false;
+  int i, key, result, foundline;
+  int fd_i = open(FILENAME_I, O_RDWR|O_CREAT, DB_FILE_FLAGS);
+  int fd_d = open(FILENAME_D, O_RDWR|O_CREAT, DB_FILE_FLAGS);
+  struct stat sb_d, sb_i;
+  struct ifile *iptr;
+  char* dptr;
 
-  if (fd == -1) {
-    printf("couldn't open file '%s': error code %d\n", FILENAME, errno);
+  if (fd_d == -1) {
+    printf("couldn't open file '%s': error code %d\n", FILENAME_D, errno);
     return 1;
   }
 
-  if (fstat(fd, &sb) == -1) {
-    printf("couldn't stat file '%s': error code %d\n", FILENAME, errno);
+  if (fd_i == -1) {
+    printf("couldn't open file '%s': error code %d\n", FILENAME_I, errno);
     return 1;
   }
 
-  void *fptr = mmap(
+  if (fstat(fd_i, &sb_i) == -1) {
+    printf("couldn't stat file '%s': error code %d\n", FILENAME_I, errno);
+    return 1;
+  }
+
+  if (fstat(fd_d, &sb_d) == -1) {
+    printf("couldn't stat file '%s': error code %d\n", FILENAME_D, errno);
+    return 1;
+  }
+
+  if (!sb_i.st_size) {
+    init = true;
+    ftruncate(fd_i, INIT_FILE_SIZE);
+    sb_i.st_size = INIT_FILE_SIZE;
+  }
+
+  if (!sb_d.st_size) {
+    ftruncate(fd_d, INIT_FILE_SIZE);
+    sb_d.st_size = INIT_FILE_SIZE;
+  }
+
+  dptr = mmap(
     NULL,
-    sb.st_size, // open whole file
+    sb_d.st_size, // open whole file
     PROT_WRITE,
     MAP_SHARED,
-    fd,
+    fd_d,
     0
   );
 
-  assert(fptr != (void *) -1);
+  assert(dptr != (void *) -1);
+
+  iptr = mmap(
+    NULL,
+    sb_i.st_size, // open whole file
+    PROT_WRITE,
+    MAP_SHARED,
+    fd_i,
+    0
+  );
+
+  assert(iptr != (void *) -1);
+
+  if (init) {
+    iptr->icount = 0;
+    iptr->iend   = 0;
+  }
 
   char command;
-  char *command_raw, *data, *linedata;
+  char *command_raw, *data;
   command_raw = (char*) malloc(sizeof(char[2]));
   data        = (char*) malloc(sizeof(char[LINE_LIM+1]));
-  linedata    = (char*) malloc(sizeof(char[LINE_LIM-KEY_LEN+1]));
 
   for (i = 0; i < argc-1; i++) {
     command_raw[0] = '\0';
@@ -65,7 +115,6 @@ int main(int argc, char** argv) {
         break; // TODO implement delete (delete one entry)
       case 'p': {
         foundline = -1;
-        line = 0;
         // while ((result = fscanf(fd, "%i=%s\n", &linekey, linedata)) > 0) {
           // if (linekey == key) {
             // foundline = line;
@@ -85,7 +134,6 @@ int main(int argc, char** argv) {
       }
       case 'g': {
         foundline = -1;
-        line = 0;
         // while ((result = fscanf(fd, "%i=%s\n", &linekey, linedata)) > 0) {
           // if (linekey == key) {
             // foundline = line;
