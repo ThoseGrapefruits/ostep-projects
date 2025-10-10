@@ -2,8 +2,10 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -11,29 +13,32 @@
 #define DB_FILE_FLAGS S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP
 #define FILENAME_I "db.indices"
 #define FILENAME_D "db.data"
-#define INIT_FILE_SIZE 4096
+#define FILE_SIZE_STEP 4096
 #define LINE_LIM 1023
 #define KEY_LEN 32
 
 struct ifile {
-  int icount;
-  int iend;
-  char indices[1023];
+  size_t key_count;
+  ptrdiff_t index_end;
+  int keys[1023];
+  ptrdiff_t indices[1023];
 };
 
 int main(int argc, char** argv) {
-  bool init = false;
-  int i, key, result, foundline;
-  int fd_i = open(FILENAME_I, O_RDWR|O_CREAT, DB_FILE_FLAGS);
-  int fd_d = open(FILENAME_D, O_RDWR|O_CREAT, DB_FILE_FLAGS);
+  bool init, found;
+  int arg, i, index, key, result, fd_d, fd_i;
   struct stat sb_d, sb_i;
   struct ifile *iptr;
   char* dptr;
+
+  fd_d = open(FILENAME_D, O_RDWR|O_CREAT, DB_FILE_FLAGS);
 
   if (fd_d == -1) {
     printf("couldn't open file '%s': error code %d\n", FILENAME_D, errno);
     return 1;
   }
+
+  fd_i = open(FILENAME_I, O_RDWR|O_CREAT, DB_FILE_FLAGS);
 
   if (fd_i == -1) {
     printf("couldn't open file '%s': error code %d\n", FILENAME_I, errno);
@@ -50,15 +55,17 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  init = false;
+
   if (!sb_i.st_size) {
     init = true;
-    ftruncate(fd_i, INIT_FILE_SIZE);
-    sb_i.st_size = INIT_FILE_SIZE;
+    ftruncate(fd_i, FILE_SIZE_STEP);
+    sb_i.st_size = FILE_SIZE_STEP;
   }
 
   if (!sb_d.st_size) {
-    ftruncate(fd_d, INIT_FILE_SIZE);
-    sb_d.st_size = INIT_FILE_SIZE;
+    ftruncate(fd_d, FILE_SIZE_STEP);
+    sb_d.st_size = FILE_SIZE_STEP;
   }
 
   dptr = mmap(
@@ -84,8 +91,10 @@ int main(int argc, char** argv) {
   assert(iptr != (void *) -1);
 
   if (init) {
-    iptr->icount = 0;
-    iptr->iend   = 0;
+    printf("INIT\n");
+    iptr->key_count = 0;
+    iptr->index_end = 0;
+    *dptr = '\0';
   }
 
   char command;
@@ -93,14 +102,14 @@ int main(int argc, char** argv) {
   command_raw = (char*) malloc(sizeof(char[2]));
   data        = (char*) malloc(sizeof(char[LINE_LIM+1]));
 
-  for (i = 0; i < argc-1; i++) {
+  for (arg = 0; arg < argc-1; arg++) {
     command_raw[0] = '\0';
     data[0] = '\0';
     key = 0;
-    result = sscanf(argv[i+1], "%[pgdca],%i,%s", command_raw, &key, data);
+    result = sscanf(argv[arg+1], "%[pgdca],%i,%s", command_raw, &key, data);
 
     if (result < 1) {
-      printf("bad input for argument %d (%d): '%s'\n", i+1, result, argv[i]);
+      printf("bad input for argument %d (%d): '%s'\n", arg+1, result, argv[i]);
       return 1;
     }
 
@@ -114,41 +123,78 @@ int main(int argc, char** argv) {
       case 'd':
         break; // TODO implement delete (delete one entry)
       case 'p': {
-        foundline = -1;
-        // while ((result = fscanf(fd, "%i=%s\n", &linekey, linedata)) > 0) {
-          // if (linekey == key) {
-            // foundline = line;
-            // break;
-          // }
-          // line++;
-        // }
+        found = false;
+        for (i = 0; i < iptr->key_count; i++) {
+          if (iptr->keys[i] == key) {
+            found = true;
+            index = iptr->indices[i];
+            printf(
+              "%d %ld %ld %ld dsize %s\n",
+              index,
+              strlen(data),
+              strlen(dptr+index),
+              iptr->index_end,
+              dptr+index
+            );
 
-        // if (foundline < 0) {
-          // fd = freopen(FILENAME, "a", fd);
-          // fprintf(fd, "%d=%s\n", key, data);
-        // } else {
-          // TODO implement replacement put
-        // }
+            if (strlen(data) <= strlen(dptr+index)) { // in-place data swap
+              if (strcmp(data, dptr+index)) {
+                strcpy(dptr+index, data);
+                *(dptr+index+strlen(data)+1) = '\0';
+                printf("%d=%s (updated, dtswp)\n", key, data);
+              }
+            } else { // in-place index swap
+              // TODO expansion check
+              iptr->indices[i] = index = iptr->index_end+1;
+              printf("%d %d=%s (updating %d, ixswp)\n", i, key, data, index);
+              iptr->index_end = strlen(data)+index-dptr;
+              strcpy(dptr+index, data);
+              *(dptr+iptr->index_end) = '\0';
+            }
+
+            break;
+          }
+        }
+
+        if (!found) {
+          // TODO expansion check
+          i = iptr->key_count++;
+          iptr->keys[i] = key;
+          iptr->indices[i] = index = iptr->index_end+1;
+          iptr->index_end = iptr->indices[i] + strlen(data);
+          strcpy(dptr+iptr->indices[i], data);
+          *(dptr+iptr->index_end) = '\0';
+          printf("%d=%s (%d inserted @ %ld, %s)\n",
+              key, data, index, iptr->indices[i], dptr+iptr->indices[i]);
+        }
 
         break;
       }
       case 'g': {
-        foundline = -1;
-        // while ((result = fscanf(fd, "%i=%s\n", &linekey, linedata)) > 0) {
-          // if (linekey == key) {
-            // foundline = line;
-            // printf("%d=%s\n", linekey, linedata);
-            // break;
-          // }
-          // line++;
-        // }
+        found = false;
+        for (i = 0; i < iptr->key_count; i++)
+          if (iptr->keys[i] == key) {
+            index = iptr->indices[i];
+            data = dptr+index;
+            printf("%d=%s (i: %d, index: %d)\n", key, data, i, index);
+            found = true;
+            break;
+          }
 
-        if (foundline < 0)
-          printf("%d: key does not exist\n", key);
+        if (!found) {
+          printf("No data found for key %d\n", key);
+        }
 
         break;
       }
     }
+  }
+
+  fsync(fd_d);
+  fsync(fd_i);
+
+  for (i = 0; i < iptr->key_count; i++) {
+    printf("indices: %d %ld %s\n", iptr->keys[i], iptr->indices[i], dptr + iptr->indices[i]);
   }
 }
 
